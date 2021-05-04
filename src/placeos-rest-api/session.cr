@@ -16,6 +16,7 @@ module PlaceOS
     # Stores sessions until their websocket closes
     class Manager
       private getter sessions : Array(Session) { [] of Session }
+      private getter session_lock = Mutex.new
       private getter discovery : HoundDog::Discovery
 
       def initialize(@discovery : HoundDog::Discovery)
@@ -31,18 +32,17 @@ module PlaceOS
           discovery: discovery,
         )
 
-        sessions << session
-
+        session_lock.synchronize { sessions << session }
         ws.on_close do |_|
           Log.trace { {frame: "CLOSE"} }
           session.cleanup
           sessions.delete(session)
+          session_lock.synchronize { sessions.delete(session) }
         end
       end
     end
 
     # Class level subscriptions to modules
-    # class_getter subscriptions : ::Proxy::Subscriptions { ::Proxy::Subscriptions.new }
     class_getter subscriptions : Driver::Proxy::Subscriptions = Driver::Proxy::Subscriptions.new
 
     # Local subscriptions
@@ -50,6 +50,10 @@ module PlaceOS
 
     # Background task to clear module metadata caches
     @cache_cleaner : Tasker::Task?
+
+    # NOTE: Might need a rw-lock/concurrent-map due to cache cleaning fiber
+    private getter metadata_cache = {} of String => Driver::DriverModel::Metadata
+    private getter module_id_cache = {} of String => String
 
     getter ws : HTTP::WebSocket
 
@@ -61,19 +65,15 @@ module PlaceOS
       @cache_timeout : Int32? = 60 * 5
     )
       # Register event handlers
-      @ws.on_message do |message|
+      ws.on_message do |message|
         Log.trace { {frame: "TEXT", text: message} }
         on_message(message)
       end
 
-      @ws.on_ping do
+      ws.on_ping do
         Log.trace { {frame: "PING"} }
-        @ws.pong
+        ws.pong
       end
-
-      # NOTE: Might need a rw-lock/concurrent-map due to cache cleaning fiber
-      @metadata_cache = {} of String => Driver::DriverModel::Metadata
-      @module_id_cache = {} of String => String
 
       @security_level = if @user.is_admin?
                           Driver::Proxy::RemoteDriver::Clearance::Admin
@@ -117,48 +117,57 @@ module PlaceOS
       )
       end
 
-      property id : Int64
+      getter id : Int64
 
       # Module location metadata
       @[JSON::Field(key: "sys")]
-      property sys_id : String
+      getter sys_id : String
 
       @[JSON::Field(key: "mod")]
-      property module_name : String
+      getter module_name : String
 
-      property index : Int32 = 1
+      getter index : Int32 = 1
 
       # Command
       @[JSON::Field(key: "cmd")]
-      property command : Command
+      getter command : Command
 
       # Function name
-      property name : String
+      getter name : String
 
       # Function arguments
       @[JSON::Field(emit_null: true)]
-      property args : Array(JSON::Any)?
+      getter args : Array(JSON::Any)?
     end
 
     alias ErrorCode = Driver::Proxy::RemoteDriver::ErrorCode
 
     # Websocket API Response
     struct Response < Base
-      property id : Int64
-      property type : Type
+      # Response type
+      enum Type
+        Success
+        Notify
+        Error
+        Debug
+      end
 
-      property error_code : Int32?
+      getter id : Int64
+      getter type : Type
+
+      @[JSON::Field(converter: Enum::ValueConverter(PlaceOS::Api::Session::ErrorCode))]
+      getter error_code : ErrorCode?
 
       @[JSON::Field(key: "msg")]
-      property message : String?
+      getter message : String?
 
-      property value : String?
-      property meta : Metadata?
+      getter value : String?
+      getter meta : Metadata?
 
       @[JSON::Field(key: "mod")]
-      property module_id : String?
+      getter module_id : String?
 
-      property level : ::Log::Severity?
+      getter level : ::Log::Severity?
 
       alias Metadata = NamedTuple(
         sys: String,
@@ -168,7 +177,7 @@ module PlaceOS
       )
 
       def initialize(
-        @id : Int64,
+        @id,
         @type,
         @error_code = nil,
         @message = nil,
@@ -179,12 +188,13 @@ module PlaceOS
       )
       end
 
-      # Response type
-      enum Type
-        Success
-        Notify
-        Error
-        Debug
+      class_getter placeholder = %("%{}")
+
+      # Avoids parsing and serialising when payload is already in JSON format
+      #
+      def self.substitute_value(response : Response, value : String)
+        # Cannot use a property as that reallocates the struct
+        response.to_json.sub(placeholder, value)
       end
     end
 
@@ -226,7 +236,7 @@ module PlaceOS
           index: index,
           name:  name,
         },
-        value: "%{}",
+        value: Response.placeholder,
       ), response)
     rescue e : Driver::Proxy::RemoteDriver::Error
       respond(error_response(request_id, e.error_code, e.message))
@@ -447,13 +457,13 @@ module PlaceOS
     def metadata?(sys_id, module_name, index) : Driver::DriverModel::Metadata?
       key = Session.cache_key(sys_id, module_name, index)
       # Try for value in the cache
-      cached = @metadata_cache[key]?
+      cached = metadata_cache[key]?
       return cached if cached
 
       # Look up value, refresh cache if value found
       if (module_id = module_id?(sys_id, module_name, index))
         Driver::Proxy::System.driver_metadata?(module_id).tap do |metadata|
-          @metadata_cache[key] = metadata if metadata
+          metadata_cache[key] = metadata if metadata
         end
       end
     end
@@ -465,12 +475,12 @@ module PlaceOS
     def module_id?(sys_id, module_name, index) : String?
       key = Session.cache_key(sys_id, module_name, index)
       # Try for value in the cache
-      cached = @module_id_cache[key]?
+      cached = module_id_cache[key]?
       return cached if cached
 
       # Look up value, refresh cache if value found
       Driver::Proxy::System.module_id?(sys_id, module_name, index).tap do |id|
-        @module_id_cache[key] = id if id
+        module_id_cache[key] = id if id
       end
     end
 
@@ -558,7 +568,7 @@ module PlaceOS
     # Request handler
     #
     protected def on_message(data)
-      return @ws.send("pong") if data == "ping"
+      return ws.send("pong") if data == "ping"
 
       # Execute the request
       request = parse_request(data)
@@ -612,19 +622,19 @@ module PlaceOS
       Request.from_json(data)
     rescue e
       Log.warn { {message: "failed to parse", data: data} }
-      error_response(JSON.parse(data)["id"]?.try &.as_i64, ErrorCode::BadRequest, "bad request: #{e.message}")
+      error_response(NamedTuple(id: Int64?).from_json(data)[:id], ErrorCode::BadRequest, "bad request: #{e.message}")
       return
     end
 
     protected def error_response(
       request_id : Int64?,
-      error_code,
+      error_code : ErrorCode?,
       message : String?
     )
       Api::Session::Response.new(
         id: request_id || 0_i64,
         type: Api::Session::Response::Type::Error,
-        error_code: error_code.to_i,
+        error_code: error_code,
         message: message || "",
       )
     end
@@ -635,22 +645,16 @@ module PlaceOS
       if (timeout = @cache_timeout) && timeout > 0
         @cache_cleaner = Tasker.instance.every(timeout.seconds) do
           Log.trace { "cleaning websocket session cache" }
-          @metadata_cache.clear
-          @module_id_cache.clear
+          metadata_cache.clear
+          module_id_cache.clear
         end
       end
     end
 
-    protected def respond(response : Response, payload = nil)
-      return if @ws.closed?
+    protected def respond(response : Response, payload : String? = nil)
+      return if ws.closed?
 
-      if payload
-        # Avoids parsing and serialising when payload is already in JSON format
-        partial = response.to_json
-        @ws.send(partial.sub(%("%{}"), payload))
-      else
-        @ws.send(response.to_json)
-      end
+      ws.send(payload ? Response.substitute_value(response, payload) : response.to_json)
     end
 
     # Delegate request to correct handler
@@ -668,9 +672,7 @@ module PlaceOS
       in .unbind? then unbind(**arguments)
       in .debug?  then debug(**arguments)
       in .ignore? then ignore(**arguments)
-      in .exec?
-        args = request.args.as(Array(JSON::Any))
-        exec(**arguments.merge({args: args}))
+      in .exec?   then exec(**arguments, args: request.args.as(Array(JSON::Any)))
       end
     end
   end
