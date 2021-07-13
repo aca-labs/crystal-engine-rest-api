@@ -7,6 +7,6 @@ Style/VerboseBlock:
   ExcludeSetters: false
   MaxLength: 50
   Excluded:
-  - spec/*
+  - spec/**/*
   Enabled: true
   Severity: Convention

@@ -1,4 +1,4 @@
-require "./helper"
+require "../helper"
 
 module PlaceOS::Api
   def self.spec_add_module(system, mod, headers)

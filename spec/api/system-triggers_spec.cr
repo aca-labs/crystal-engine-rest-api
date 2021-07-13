@@ -1,4 +1,4 @@
-require "./helper"
+require "../helper"
 require "timecop"
 
 module PlaceOS::Api

@@ -5,7 +5,7 @@ require "action-controller"
 
 # Application code
 require "./logging"
-require "./placeos-rest-api"
+require "./api"
 
 # Server required after application controllers
 require "action-controller/server"

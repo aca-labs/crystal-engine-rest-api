@@ -1,5 +1,5 @@
 require "./application"
-require "../utilities/core_discovery"
+require "./utilities/core_discovery"
 
 require "rethinkdb"
 require "rethinkdb-orm"

@@ -10,8 +10,8 @@ require "tasker"
 require "./error"
 require "./utilities/params"
 
-module PlaceOS
-  class Api::Session
+module PlaceOS::Api
+  class Session
     Log = ::Log.for(self)
 
     # Stores sessions until their websocket closes

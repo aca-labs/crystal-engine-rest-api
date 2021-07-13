@@ -3,7 +3,7 @@ require "placeos-models"
 require "uuid"
 
 require "../error"
-require "../utilities/*"
+require "./utilities/*"
 
 module PlaceOS::Api
   private abstract class Application < ActionController::Base

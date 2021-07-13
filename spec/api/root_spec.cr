@@ -1,4 +1,4 @@
-require "./helper"
+require "../helper"
 
 module PlaceOS::Api
   describe Root do

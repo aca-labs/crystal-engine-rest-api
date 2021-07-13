@@ -3,8 +3,8 @@ require "log_helper"
 require "secrets-env"
 
 require "./constants"
-require "./placeos-rest-api/controllers/application"
-require "./placeos-rest-api/controllers/*"
+require "./api/application"
+require "./api/*"
 
 module PlaceOS::Api
   Log = ::Log.for(self)
