@@ -1,10 +1,5 @@
-# FIXME: Hack to allow resolution of PlaceOS::Driver class/module
-module PlaceOS; end
-
-class PlaceOS::Driver; end
-
 require "http"
-# require "placeos-log-backend"
+require "mutex"
 require "promise"
 require "random"
 require "rethinkdb-orm"
@@ -15,9 +10,11 @@ require "webmock"
 require "../lib/action-controller/spec/curl_context"
 
 Spec.before_suite do
-  Log.builder.bind("*", backend: PlaceOS::LogBackend::STDOUT, level: Log::Severity::Trace)
+  Log.builder.bind("*", backend: PlaceOS::LogBackend::STDOUT, level: :trace)
   clear_tables
 end
+
+Spec.after_suite { clear_tables }
 
 # Application config
 require "../src/config"
@@ -31,8 +28,6 @@ require "spec"
 db_name = "place_#{ENV["SG_ENV"]? || "development"}"
 
 RethinkORM.configure &.db=(db_name)
-
-Spec.after_suite { clear_tables }
 
 def clear_tables
   {% begin %}
@@ -53,24 +48,27 @@ def clear_tables
   {% end %}
 end
 
+AUTH_LOCK = Mutex.new
+
 # Yield an authenticated user, and a header with Authorization bearer set
 def authentication(scope = ["public"] of String)
-  test_user_email = "test-suit-rest-api@place.tech"
-  existing = PlaceOS::Model::User.find_all([test_user_email], index: :email).first?
+  AUTH_LOCK.synchronize do
+    test_user_email = "test-suit-rest-api@place.tech"
+    existing = PlaceOS::Model::User.find_all([test_user_email], index: :email).first?
 
-  authenticated_user = if existing
-                         existing
-                       else
-                         user = PlaceOS::Model::Generator.user
-                         user.sys_admin = true
-                         user.support = true
-                         user.save!
-                       end
-
-  authorization_header = {
-    "Authorization" => "Bearer #{PlaceOS::Model::Generator.jwt(authenticated_user, scope).encode}",
-  }
-  {authenticated_user, authorization_header}
+    authenticated_user = if existing
+                           existing
+                         else
+                           user = PlaceOS::Model::Generator.user
+                           user.sys_admin = true
+                           user.support = true
+                           user.save!
+                         end
+    authorization_header = {
+      "Authorization" => "Bearer #{PlaceOS::Model::Generator.jwt(authenticated_user, scope).encode}",
+    }
+    {authenticated_user, authorization_header}
+  end
 end
 
 # Check application responds with 404 when model not present
