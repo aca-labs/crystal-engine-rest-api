@@ -86,36 +86,9 @@ module PlaceOS::Api
       driver.update_fields(commit: "RECOMPILE-#{driver.commit}")
 
       # Initiate changefeed on the document's commit
-      changefeed = Model::Driver.changes(driver.id.as(String))
-      channel = Channel(Model::Driver?).new(1)
-
-      # Wait until the commit hash is not head with a timeout of 20 seconds
-      found_driver = begin
-        spawn do
-          update_event = changefeed.find do |event|
-            driver_update = event.value
-            driver_update.destroyed? || !driver_update.commit.starts_with? "RECOMPILE"
-          end
-          channel.send(update_event.try &.value)
-        end
-
-        select
-        when received = channel.receive
-          received
-        when timeout(20.seconds)
-          raise "timeout waiting for recompile"
-        end
-
-        received
-      rescue
-        nil
-      ensure
-        channel.close
-        # Terminate the changefeed
-        changefeed.stop
+      find_change(driver) do |driver_update|
+        driver_update.destroyed? || !driver_update.commit.starts_with? "RECOMPILE"
       end
-
-      found_driver
     end
 
     # Check if the core responsible for the driver has finished compilation

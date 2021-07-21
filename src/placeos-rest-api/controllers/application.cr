@@ -99,6 +99,38 @@ module PlaceOS::Api
       body
     end
 
+    # Query helper
+    ###########################################################################
+
+    # Helper for observing change on a row
+    #
+    def self.find_change(model : T, timeout : Time::Span = 3.minutes, &block : T -> Bool) : T? forall T
+      changefeed = T.changes(model.id.as(String))
+      channel = Channel(T?).new(1)
+      begin
+        spawn do
+          update_event = changefeed.find do |event|
+            block.call(event.value)
+          end
+          channel.send(update_event.try &.value)
+        end
+
+        select
+        when received = channel.receive?
+          received
+        when timeout(timeout)
+          Log.info { "timeout for waiting for a change on #{T.name}<#{model.id}>" }
+          nil
+        end
+      rescue
+        nil
+      ensure
+        # Terminate the changefeed
+        changefeed.stop
+        channel.close
+      end
+    end
+
     # Error Handlers
     ###########################################################################
 
