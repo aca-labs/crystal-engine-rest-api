@@ -76,33 +76,8 @@ module PlaceOS::Api
       # Trigger a pull event
       repository.pull!
 
-      # Initiate changefeed on the document's commit_hash
-      changefeed = Model::Repository.changes(repository.id.as(String))
-      channel = Channel(Model::Repository?).new(1)
-
-      # Wait until the commit hash is not head with a timeout of 20 seconds
-      found_repo = begin
-        spawn do
-          update_event = changefeed.find do |event|
-            repo = event.value
-            repo.destroyed? || !repo.should_pull?
-          end
-          channel.send(update_event.try &.value)
-        end
-
-        select
-        when received = channel.receive?
-          received
-        when timeout(3.minutes)
-          Log.info { "timeout" }
-          raise "timeout for repository update"
-        end
-      rescue
-        nil
-      ensure
-        # Terminate the changefeed
-        changefeed.stop
-        channel.close
+      found_repo = find_change(repository) do |repo|
+        repo.destroyed? || !repo.should_pull?
       end
 
       unless found_repo.nil?
